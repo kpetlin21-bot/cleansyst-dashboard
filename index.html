@@ -244,6 +244,591 @@ function renderCharts(){
   const rateTitle=document.getElementById('rate-title');
 
   if(isDayMode()){
+    // Почасовой график — реальные данные из started_at (если есть)
+    const hourly = periodData.hourly || null;
+    const hours  = periodData.hourlyHours || [8,9,10,11,12,13,14,15,16,17,18,19,20];
+    const labels = hours.map(x=>x+':00');
+
+    if(hourly && hourly.some(v=>v>0)){
+      // Реальные данные
+      let cum=0; const total=hourly.reduce((a,b)=>a+b,0)||1;
+      const cumPct=hourly.map(v=>{cum+=v; return Math.round(cum/total*100);});
+      rateTitle.textContent='Выполнение по часам ('+(period==='today'?'сегодня':'вчера')+') · реальные данные';
+      chartRate=new Chart(document.getElementById('chartRate'),{
+        data:{labels,datasets:[
+          {type:'bar',label:'Закрыто задач',data:hourly,backgroundColor:'#378ADD',yAxisID:'y',order:2},
+          {type:'line',label:'Нарастающий итог, %',data:cumPct,borderColor:'#3B6D11',backgroundColor:'rgba(59,109,17,0.08)',tension:0.3,pointRadius:3,yAxisID:'y1',order:1,fill:true}
+        ]},
+        options:{responsive:true,maintainAspectRatio:false,
+          scales:{y:{position:'left',beginAtZero:true,title:{display:true,text:'задач',font:{size:10}}},
+                  y1:{position:'right',min:0,max:100,grid:{drawOnChartArea:false},ticks:{callback:v=>v+'%'},title:{display:true,text:'% итог',font:{size:10}}}},
+          plugins:{legend:{display:true,position:'top',labels:{boxWidth:10,font:{size:11}}}}}
+      });
+    } else {
+      // Нет реальных данных — показываем сообщение
+      rateTitle.textContent='Выполнение по часам ('+(period==='today'?'сегодня':'вчера')+')';
+      chartRate=new Chart(document.getElementById('chartRate'),{
+        type:'bar',
+        data:{labels,datasets:[{label:'Нет данных о времени выполнения',data:labels.map(()=>0),backgroundColor:'#D3D1C7'}]},
+        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}}
+      });
+    }
+  } else {
+    // Динамика по дням из истории Supabase (если есть), иначе одна точка
+    const data = history.length ? history.slice(-parseInt(period)||30) : [];
+    rateTitle.textContent='Динамика выполнения задач, %';
+    if(!data.length){
+      // Нет истории — показываем одну точку текущего периода
+      chartRate=new Chart(document.getElementById('chartRate'),{
+        type:'bar',
+        data:{labels:[periodData.suffix],datasets:[
+          {label:'% выполнения',data:[periodData.rate],backgroundColor:'#378ADD'}
+        ]},
+        options:{responsive:true,maintainAspectRatio:false,
+          scales:{y:{min:0,max:100,ticks:{callback:v=>v+'%'}}},
+          plugins:{legend:{display:false}}}
+      });
+    } else {
+      const labels=data.map(d=>fmtDate(d.date));
+      chartRate=new Chart(document.getElementById('chartRate'),{
+        type:'line',
+        data:{labels,datasets:[{label:'% выполнения',data:data.map(d=>d.rate),borderColor:'#185FA5',backgroundColor:'rgba(24,95,165,0.08)',fill:true,tension:0.3,pointRadius:3}]},
+        options:{responsive:true,maintainAspectRatio:false,scales:{y:{min:0,max:100,ticks:{callback:v=>v+'%'}}},plugins:{legend:{display:false}}}
+      });
+    }
+  }
+}
+
+function statusColor(s){return s==='ok'?'#97C459':(s==='warn'?'#EF9F27':'#E24B4A');}
+function renderMap(){
+  const NS='http://www.w3.org/2000/svg';
+  const rg=document.getElementById('map-roads'); rg.innerHTML='';
+  ROADS_GEO.forEach(r=>{
+    const pl=document.createElementNS(NS,'polyline');
+    pl.setAttribute('points',r.pts); pl.setAttribute('fill','none'); pl.setAttribute('stroke-linecap','round');
+    if(r.cls==='drive'){pl.setAttribute('stroke','#C9C2B4');pl.setAttribute('stroke-width','4');}
+    else{pl.setAttribute('stroke','#C2BBA8');pl.setAttribute('stroke-width','1.5');pl.setAttribute('stroke-dasharray','3 2.5');}
+    pl.setAttribute('opacity','0.85'); rg.appendChild(pl);
+  });
+  const hg=document.getElementById('map-houses'); hg.innerHTML='';
+  const byId={}; houseToday.forEach(h=>byId[h.id]=h);
+  HOUSES_GEO.forEach(h=>{
+    const st=byId[h.id];
+    const grp=document.createElementNS(NS,'g'); grp.style.cursor='pointer';
+    const poly=document.createElementNS(NS,'polygon');
+    poly.setAttribute('points',h.points);
+    poly.setAttribute('fill',st?statusColor(st.status):'#D3D1C7');
+    poly.setAttribute('fill-opacity','0.9');
+    poly.setAttribute('stroke', h.id===selectedHouse?'#185FA5':'#5F5E5A');
+    poly.setAttribute('stroke-width', h.id===selectedHouse?'2.5':'0.8');
+    grp.appendChild(poly);
+    const t=document.createElementNS(NS,'text');
+    t.setAttribute('x',h.cx); t.setAttribute('y',h.cy+3); t.setAttribute('text-anchor','middle');
+    t.setAttribute('font-size','8.5'); t.setAttribute('font-weight','600'); t.setAttribute('fill','#1A1A18');
+    t.setAttribute('paint-order','stroke'); t.setAttribute('stroke','#fff'); t.setAttribute('stroke-width','2.4');
+    t.textContent=h.id; grp.appendChild(t);
+    grp.addEventListener('click',()=>selectHouse(h.id));
+    hg.appendChild(grp);
+  });
+}
+
+function selectHouse(id){
+  selectedHouse=id; renderMap();
+  const h=houseToday.find(x=>x.id===id);
+  const geo=HOUSES_GEO.find(x=>x.id===id);
+  const det=document.getElementById('house-detail');
+  document.getElementById('house-detail-title').textContent='Детализация — '+(geo?geo.label:id);
+
+  if(!h){
+    det.innerHTML='<div style="color:var(--text-3);font-size:13px;">⏳ Данные по дому загружаются…</div>';
+    return;
+  }
+
+  const stLabel=h.status==='ok'?'Выполнено':(h.status==='warn'?'Есть просрочки':'Критично');
+  const stCls=h.status==='ok'?'ok':(h.status==='warn'?'warn':'crit');
+  const barColor=statusColor(h.status);
+
+  det.innerHTML=
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">'+
+      '<span class="pill '+stCls+'">'+stLabel+'</span>'+
+      '<span style="font-size:13px;color:var(--text-2);">'+h.closed+'/'+h.tasks+' задач · <b style="color:'+barColor+'">'+h.pct+'%</b></span>'+
+    '</div>'+
+    '<div style="height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;margin-bottom:16px;">'+
+      '<div style="height:100%;width:'+h.pct+'%;background:'+barColor+';border-radius:3px;"></div>'+
+    '</div>'+
+    '<div id="mop-pdt-area"><div style="color:var(--text-3);font-size:13px;">⏳ Загружаю МОП и ПДТ…</div></div>';
+
+  // Загружаем детализацию МОП/ПДТ
+  if(h.locationId) loadHouseDetail(h.locationId, h.label);
+}
+
+async function loadHouseDetail(locationId, houseLabel){
+  const today=new Date().toISOString().slice(0,10);
+  const area=document.getElementById('mop-pdt-area');
+  if(!area) return;
+  try{
+    const r=await fetch(PROXY+'?action=house_detail&location_id='+locationId+'&date='+today,
+      {signal:AbortSignal.timeout(90000)});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(d.error){ area.innerHTML='<div style="color:var(--text-3);font-size:13px;">'+d.error+'</div>'; return; }
+    area.innerHTML = renderMopPdt(d);
+  }catch(e){
+    if(area) area.innerHTML='<div style="color:var(--text-3);font-size:13px;">Не удалось загрузить детализацию.</div>';
+    console.warn('house_detail:', e);
+  }
+}
+
+function renderMopPdt(d){
+  function pill(pct){ const col=pct>=90?'var(--green)':(pct>=70?'var(--amber)':'var(--red)'); return '<span style="color:'+col+';font-weight:500;">'+pct+'%</span>'; }
+  function bar(pct){ const col=pct>=90?'#97C459':(pct>=70?'#EF9F27':'#E24B4A'); return '<div style="height:4px;background:var(--surface-2);border-radius:2px;margin:4px 0 8px;"><div style="height:100%;width:'+pct+'%;background:'+col+';border-radius:2px;"></div></div>'; }
+
+  let html='';
+
+  // ── МОП ──
+  const m=d.mop;
+  html+='<div style="background:var(--surface-2);border-radius:10px;padding:12px;margin-bottom:10px;">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'+
+      '<span style="font-size:13px;font-weight:500;">🧹 МОП (подъезды)</span>'+
+      '<span>'+m.done+'/'+m.total+' · '+pill(m.pct)+'</span>'+
+    '</div>'+bar(m.pct);
+
+  if(m.zones && m.zones.length){
+    html+='<div style="display:grid;gap:6px;">';
+    m.zones.forEach(z=>{
+      const zCol=z.pct>=90?'#97C459':(z.pct>=70?'#EF9F27':'#E24B4A');
+      html+='<div style="background:var(--surface);border-radius:7px;padding:8px 10px;">'+
+        '<div style="display:flex;justify-content:space-between;font-size:12px;">'+
+          '<span style="color:var(--text-2);">'+z.name+'</span>'+
+          '<span>'+z.done+'/'+z.total+' · '+pill(z.pct)+'</span>'+
+        '</div>'+
+        '<div style="height:3px;background:var(--surface-2);border-radius:2px;margin-top:5px;">'+
+          '<div style="height:100%;width:'+z.pct+'%;background:'+zCol+';border-radius:2px;"></div>'+
+        '</div>'+
+      '</div>';
+    });
+    html+='</div>';
+  } else {
+    html+='<div style="font-size:12px;color:var(--text-3);">Секции не найдены</div>';
+  }
+  html+='</div>';
+
+  // ── ПДТ ──
+  const p=d.pdt;
+  const pdtNote = p.total===0
+    ? '<div style="font-size:12px;color:var(--text-3);margin-top:4px;">Задачи придомовой территории совпадают с МОП или не назначены на локации</div>'
+    : '';
+  html+='<div style="background:var(--surface-2);border-radius:10px;padding:12px;">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'+
+      '<span style="font-size:13px;font-weight:500;">🧤 ПДТ (территория)</span>'+
+      '<span>'+p.done+'/'+p.total+' · '+pill(p.pct)+'</span>'+
+    '</div>'+bar(p.pct)+pdtNote+
+  '</div>';
+
+  return html;
+}
+
+function renderShifts(){
+  const sh=liveShifts;
+  const came=sh.filter(s=>s.came).length;
+  const absent=sh.filter(s=>!s.came).length;
+  document.getElementById('shift-summary').innerHTML=
+    '<div><b>'+came+'</b> <span class="lbl">вышло из '+sh.length+'</span></div>'+
+    '<div><b style="color:var(--red)">'+absent+'</b> <span class="lbl">не вышли</span></div>';
+  function rowsFor(role){
+    const list=sh.filter(s=>s.role===role);
+    if(!list.length) return '<tr><td colspan="4" style="color:var(--text-3)">нет данных</td></tr>';
+    return list.map(s=>{
+      const st=s.came?'Вышел':'Не вышел';
+      const cls=s.came?'ok':'absent';
+      return '<tr><td>'+s.name+'</td><td>'+(s.in||'—')+'</td><td>'+(s.out||'—')+'</td>'+
+        '<td><span class="pill '+cls+'">'+st+'</span></td></tr>';
+    }).join('');
+  }
+  document.getElementById('shift-cleaners').innerHTML=rowsFor('Уборщица');
+  document.getElementById('shift-janitors').innerHTML=rowsFor('Дворник');
+}
+
+function renderHouseTable(){
+  const tb=document.getElementById('house-body');
+  tb.innerHTML=houseToday.map(h=>{
+    const col=statusColor(h.status);
+    return '<tr class="clickable" data-id="'+h.id+'"><td style="font-weight:500;">'+h.label+'</td><td>'+h.tasks+'</td><td>'+h.closed+'</td>'+
+      '<td><span class="traffic"><span class="tdot" style="background:'+col+'"></span>'+h.pct+'%</span></td></tr>';
+  }).join('');
+  tb.querySelectorAll('tr.clickable').forEach(tr=>tr.onclick=()=>selectHouse(tr.dataset.id));
+}
+
+function renderAll(){ renderKPI(); renderCharts(); renderMap(); renderShifts(); renderHouseTable(); }
+
+document.getElementById('period-seg').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b)return;
+  period=b.dataset.p;
+  document.querySelectorAll('#period-seg button').forEach(x=>x.classList.toggle('active',x===b));
+  loadPeriod(period);
+});
+
+// Загружаем данные за произвольный период
+async function loadPeriod(p){
+  const dateParam=getDateParam(p);
+  const cacheKey=p+':'+dateParam;
+
+  // Сначала показываем заглушку
+  periodData=null; renderKPI();
+  setStatus('Загрузка за период…');
+
+  // Проверяем кеш в памяти
+  if(periodCache[cacheKey]){
+    periodData=periodCache[cacheKey];
+    renderKPI(); renderCharts();
+    setStatus('✓ '+periodCache[cacheKey].suffix);
+    return;
+  }
+
+  try{
+    const action = (p==='today'||p==='yesterday') ? 'dashboard' : 'period_tasks';
+    const r=await fetch(PROXY+'?action='+action+'&date='+dateParam);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+
+    // Для dashboard дополнительно обновляем смены и «в работе»
+    if(action==='dashboard'){
+      liveShifts = d.shifts||[];
+      liveInProgress = d.tasks.in_progress||0;
+      // Сохраняем снимок в историю
+      const rec={date:d.date,tasks:d.tasks.total,closed:d.tasks.done,
+        inProgress:d.tasks.in_progress||0,missed:d.tasks.missed||0,
+        rate:d.tasks.rate,staffPlan:d.staff.total,came:d.staff.came,absent:d.staff.absent};
+      const idx=history.findIndex(x=>x.date===d.date);
+      if(idx>=0) history[idx]=rec; else history.push(rec);
+      if(!d.isYesterday) setTimeout(()=>saveSnapshot().catch(()=>{}), 2000);
+    }
+
+    const t=d.tasks;
+    // Формируем подпись периода
+    let suffix='';
+    if(p==='today')     suffix='сегодня, '+fmtDate(d.date||dateParam);
+    else if(p==='yesterday') suffix='вчера, '+fmtDate(dateParam);
+    else if(p==='7')    suffix='текущая неделя';
+    else if(p==='30')   suffix='текущий месяц';
+
+    periodData={
+      tasks:t.total, closed:t.done, inProgress:t.in_progress||0,
+      missed:t.missed||0, rate:t.rate, suffix,
+      hourly: (action==='dashboard' && d.tasks.hourly) ? d.tasks.hourly : null,
+      hourlyHours: (action==='dashboard' && d.tasks.hourly_hours) ? d.tasks.hourly_hours : null,
+    };
+    periodCache[cacheKey]=periodData;
+
+    renderKPI(); renderCharts();
+    setStatus('✓ Данные обновлены · '+suffix);
+  }catch(e){
+    setStatus('⚠ Ошибка: '+e.message);
+    console.error('loadPeriod:', e);
+  }
+  renderShifts(); renderSummary();
+}
+async function loadToday(){
+  await loadPeriod('today');
+  loadHouseBreakdown();
+}
+
+// Загрузка детализации по домам (может занять 10-20 сек — много API-вызовов)
+async function loadHouseBreakdown(){
+  const today=new Date().toISOString().slice(0,10);
+  try{
+    // Показываем индикатор загрузки на карте
+    document.getElementById('house-detail').innerHTML=
+      '<div style="color:var(--text-3);font-size:13px;">⏳ Загрузка детализации по домам…</div>';
+    const r=await fetch(PROXY+'?action=house_breakdown&date='+today,{signal:AbortSignal.timeout(90000)});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(d.houses && d.houses.length){
+      houseToday = d.houses.map(h=>({
+        id: h.id,
+        label: h.label,
+        locationId: h.locationId,
+        pct: h.pct,
+        status: h.status,
+        tasks: h.total,
+        closed: h.done,
+      }));
+      renderMap();
+      renderHouseTable();
+      // Если дом был выбран — обновляем детализацию реальными данными
+      if(selectedHouse){
+        selectHouse(selectedHouse);
+      } else {
+        document.getElementById('house-detail').innerHTML=
+          '<div style="color:var(--text-3);font-size:13px;">Кликните по дому на карте, чтобы увидеть детали.</div>';
+      }
+    }
+  }catch(e){
+    console.warn('house_breakdown:', e);
+    document.getElementById('house-detail').innerHTML=
+      '<div style="color:var(--text-3);font-size:13px;">Не удалось загрузить детализацию по домам.</div>';
+  }
+}
+
+// Загружаем историю из Supabase
+async function loadHistory(){
+  try{
+    const url=SB_URL+'/rest/v1/'+SB_TABLE+'?select=snap_date,payload&order=snap_date.asc';
+    const r=await fetch(url,{headers:SB_HEADERS});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const rows=await r.json();
+    if(rows&&rows.length){
+      history=rows.map(x=>x.payload);
+      setStatus('История из облака ('+rows.length+' дн.)');
+    }
+  }catch(e){}
+  // После истории сразу подгружаем сегодня (перезапишет последний день реальными данными)
+  await loadToday();
+}
+
+function setStatus(t){ statusEl.textContent=t; }
+
+async function saveSnapshot(){
+  const today=new Date().toISOString().slice(0,10);
+  const t=history.find(x=>x.date===today)||history[history.length-1];
+  if(!t){ setStatus('Нет данных для сохранения'); return; }
+  setStatus('Сохранение снимка…');
+  try{
+    const url=SB_URL+'/rest/v1/'+SB_TABLE;
+    const r=await fetch(url,{method:'POST',headers:{...SB_HEADERS,'Prefer':'resolution=merge-duplicates'},
+      body:JSON.stringify({snap_date:t.date,payload:t})});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    setStatus('✓ Снимок за '+fmtDate(t.date)+' сохранён');
+  }catch(e){ setStatus('⚠ Не удалось сохранить'); }
+}
+document.getElementById('snapshot-btn').onclick=saveSnapshot;
+
+// Автообновление каждые 5 минут
+setInterval(loadToday, 5*60*1000);
+
+document.querySelectorAll('h3.ch').forEach(h=>{
+  h.addEventListener('click',()=>{
+    const card=h.closest('.card');
+    card.classList.toggle('collapsed');
+    if(!card.classList.contains('collapsed') && chartRate){ setTimeout(()=>{ if(chartRate)chartRate.resize(); },10); }
+  });
+});
+
+// Сначала рисуем пустой дашборд, затем грузим историю и сегодня
+renderAll();
+loadHistory();
+</script>
+</body>
+</html>  .card.collapsed .chev{transform:rotate(-90deg);}
+  .card.collapsed h3{margin-bottom:0;}
+  .card.collapsed .cbody{display:none;}
+  .chart-wrap{position:relative; width:100%; height:240px;}
+  .map-wrap{background:#EDEAE2; border-radius:10px; padding:8px; border:0.5px solid var(--border);}
+  .map-wrap svg{width:100%; height:auto; display:block;}
+  table{width:100%; font-size:13px; border-collapse:collapse;}
+  th{text-align:left; color:var(--text-2); font-weight:500; padding:8px 6px; border-bottom:0.5px solid var(--border); white-space:nowrap;}
+  td{padding:8px 6px; border-bottom:0.5px solid var(--border);}
+  tbody tr.clickable{cursor:pointer;}
+  tbody tr.clickable:hover{background:var(--surface-2);}
+  .pill{display:inline-block; padding:2px 9px; border-radius:12px; font-size:12px; font-weight:500;}
+  .pill.ok{background:#EAF3DE; color:var(--green);} .pill.warn{background:#FAEEDA; color:var(--amber);} .pill.crit{background:#FCEBEB; color:var(--red);}
+  .pill.late{background:#FAEEDA; color:var(--amber);} .pill.absent{background:#FCEBEB; color:var(--red);}
+  .traffic{display:inline-flex; align-items:center; gap:7px;}
+  .tdot{width:11px; height:11px; border-radius:50%; display:inline-block; flex:none;}
+  .legend{font-size:11px; color:var(--text-2); display:flex; gap:14px; flex-wrap:wrap; margin-top:8px;}
+  .legend span{display:inline-flex; align-items:center; gap:5px;}
+  .dot{width:10px; height:10px; border-radius:50%; display:inline-block;}
+  .demo-badge{font-size:11px; background:#FAEEDA; color:var(--amber); padding:3px 8px; border-radius:6px;}
+  .mini{display:flex; gap:16px; flex-wrap:wrap; margin-bottom:10px;}
+  .mini b{font-size:20px; font-weight:500;}
+  .mini .lbl{font-size:12px; color:var(--text-2);}
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <div>
+      <h1 class="title">Дашборд руководителя — ЖК «Новое Колпино»</h1>
+      <div class="subtitle">Операционные показатели клининга · источник: ThroneBaron <span class="demo-badge">демо-данные</span></div>
+    </div>
+    <div class="toolbar">
+      <div class="seg" id="period-seg">
+        <button data-p="today">Сегодня</button>
+        <button data-p="yesterday">Вчера</button>
+        <button data-p="7">Неделя</button>
+        <button data-p="30" class="active">Месяц</button>
+      </div>
+      <button id="snapshot-btn" title="Сохранить снимок за сегодня в историю">💾 Снимок дня</button>
+      <span id="save-status" class="status"></span>
+    </div>
+  </div>
+
+  <div class="kpi-grid" id="kpi-grid"></div>
+
+  <div class="card collapsible">
+    <h3 class="ch" data-target="b-rate"><span class="chev">▾</span> <span id="rate-title">Динамика выполнения задач</span></h3>
+    <div class="cbody" id="b-rate">
+      <div class="chart-wrap"><canvas id="chartRate" role="img" aria-label="График выполнения задач"></canvas></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card collapsible">
+      <h3 class="ch" data-target="b-map"><span class="chev">▾</span> Карта объекта — светофор по домам (кликабельно)</h3>
+      <div class="cbody" id="b-map">
+        <div class="map-wrap">
+          <svg viewBox="0 0 760 626" xmlns="http://www.w3.org/2000/svg" id="map-svg">
+            <rect x="0" y="0" width="760" height="626" fill="#EDEAE2" rx="8"/>
+            <g id="map-roads"></g>
+            <g id="map-houses"></g>
+          </svg>
+        </div>
+        <div class="legend">
+          <span><span class="dot" style="background:#97C459"></span> выполнено (90%+)</span>
+          <span><span class="dot" style="background:#EF9F27"></span> есть просрочки</span>
+          <span><span class="dot" style="background:#E24B4A"></span> критично</span>
+        </div>
+      </div>
+    </div>
+    <div class="card collapsible">
+      <h3 class="ch" data-target="b-detail"><span class="chev">▾</span> <span id="house-detail-title">Детализация по дому</span></h3>
+      <div class="cbody" id="b-detail">
+        <div id="house-detail" style="font-size:13px; color:var(--text-2);">Кликните по дому на карте, чтобы увидеть детали.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card collapsible" style="margin-bottom:14px;">
+    <h3 class="ch" data-target="b-shifts"><span class="chev">▾</span> Смены сегодня — приход / уход</h3>
+    <div class="cbody" id="b-shifts">
+      <div class="mini" id="shift-summary"></div>
+      <div style="font-size:13px; font-weight:500; color:var(--text-2); margin:6px 0 4px;"><i class="ti ti-spray"></i> Уборщицы</div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Дом</th><th>Сотрудник</th><th>План</th><th>Приход</th><th>Уход</th><th>Статус</th></tr></thead>
+          <tbody id="shift-cleaners"></tbody>
+        </table>
+      </div>
+      <div style="font-size:13px; font-weight:500; color:var(--text-2); margin:14px 0 4px;"><i class="ti ti-shovel"></i> Дворники</div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Дом</th><th>Сотрудник</th><th>План</th><th>Приход</th><th>Уход</th><th>Статус</th></tr></thead>
+          <tbody id="shift-janitors"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card collapsible">
+    <h3 class="ch" data-target="b-rating"><span class="chev">▾</span> Рейтинг домов (сегодня)</h3>
+    <div class="cbody" id="b-rating">
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Дом</th><th>Задач на день</th><th>Закрыто</th><th>Выполнение</th></tr></thead>
+          <tbody id="house-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+// Почасовой график — данные из ThroneBaron API пока не предоставляют разбивку по часам,
+// поэтому используем типичное распределение нагрузки (обновится при подключении вебхуков)
+const HOURLY_TEMPLATE = {
+  hours: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+  weights: [3, 8, 12, 11, 7, 4, 5, 9, 10, 6, 3, 2, 1]
+};
+function buildHourly(totalClosed){
+  const s=HOURLY_TEMPLATE.weights.reduce((a,b)=>a+b,0);
+  const perHour=HOURLY_TEMPLATE.weights.map(w=>Math.round(totalClosed*w/s));
+  const diff=totalClosed-perHour.reduce((a,b)=>a+b,0);
+  perHour[2]+=diff;
+  return {hours:HOURLY_TEMPLATE.hours, perHour, totalTasks:totalClosed};
+}
+const HOUSES_GEO=[{"id": "37к2", "points": "196.3,513.9 195.8,503.5 187.0,503.9 184.7,454.9 169.6,455.6 172.4,515.0 196.3,513.9", "cx": 186.0, "cy": 494.4, "label": "Загородная 37к2"}, {"id": "41к3", "points": "169.8,446.0 180.9,445.4 180.3,433.9 212.7,432.2 212.1,420.0 168.6,422.2 169.8,446.0", "cx": 184.9, "cy": 435.1, "label": "Загородная 41к3"}, {"id": "43к3", "points": "164.7,377.4 178.4,376.4 174.3,319.0 225.4,315.5 229.5,373.7 243.3,372.8 238.4,302.7 159.8,308.1 164.7,377.4", "cx": 197.6, "cy": 347.0, "label": "Загородная 43к3"}, {"id": "43к4", "points": "282.1,369.4 295.7,368.4 291.7,311.0 342.8,307.5 346.9,365.7 360.7,364.8 355.8,294.7 277.2,300.1 282.1,369.4", "cx": 315.0, "cy": 339.0, "label": "Загородная 43к4"}, {"id": "43к5", "points": "398.4,361.7 412.7,361.0 409.6,301.7 461.0,299.1 464.0,357.0 477.1,356.4 473.6,287.3 394.8,291.2 398.4,361.7", "cx": 432.2, "cy": 330.8, "label": "Загородная 43к5"}, {"id": "45к3", "points": "232.0,220.0 215.6,221.2 217.5,246.0 170.9,249.5 169.1,224.9 153.3,226.1 156.3,264.8 234.9,259.0 232.0,220.0", "cx": 198.0, "cy": 236.8, "label": "Загородная 45к3"}, {"id": "45к4", "points": "348.4,212.7 332.0,214.0 333.9,238.8 287.3,242.3 285.5,217.7 269.7,218.9 272.6,257.6 351.3,251.8 348.4,212.7", "cx": 314.3, "cy": 229.6, "label": "Загородная 45к4"}, {"id": "30к1", "points": "711.4,270.2 633.4,276.2 636.4,313.6 650.9,312.5 649.1,289.4 698.0,285.6 699.9,309.6 714.4,308.4 711.4,270.2", "cx": 678.3, "cy": 292.9, "label": "Севастьянова 30к1"}, {"id": "30к2", "points": "592.3,278.8 514.4,284.0 516.9,321.4 531.4,320.5 529.8,297.4 578.8,294.2 580.4,318.1 594.9,317.2 592.3,278.8", "cx": 559.0, "cy": 301.2, "label": "Севастьянова 30к2"}, {"id": "32к2", "points": "584.6,183.0 567.9,184.3 570.4,217.5 523.8,221.1 521.2,187.1 504.9,188.3 508.7,236.9 588.3,230.8 584.6,183.0", "cx": 550.5, "cy": 203.6, "label": "Севастьянова 32к2"}, {"id": "32к4", "points": "466.1,205.3 449.7,206.5 451.6,231.3 405.1,234.8 403.2,210.2 387.5,211.4 390.4,250.2 469.1,244.3 466.1,205.3", "cx": 432.1, "cy": 222.1, "label": "Севастьянова 32к4"}, {"id": "34к1", "points": "701.6,128.2 695.0,30.3 686.6,30.8 686.6,30.0 676.8,30.6 676.9,32.1 671.0,32.5 670.9,31.0 661.6,31.6 661.7,32.9 649.8,33.7 649.8,32.3 640.4,32.9 640.4,34.1 634.3,34.5 634.3,33.1 624.6,33.7 624.7,35.2 616.6,35.7 623.0,131.7 626.4,131.4 626.5,132.1 646.8,130.8 646.0,117.2 634.6,117.9 633.6,103.5 635.5,103.4 632.4,56.2 631.4,56.3 631.2,52.3 627.5,52.6 627.1,46.6 641.1,45.7 641.2,47.2 653.5,46.4 653.4,45.3 659.4,44.9 659.5,46.1 671.9,45.3 671.8,43.9 686.3,42.9 686.7,48.6 682.7,48.9 683.0,52.5 681.5,52.6 686.9,129.7 690.7,129.5 690.7,128.1 698.5,127.6 698.6,128.4 701.6,128.2", "cx": 658.1, "cy": 65.3, "label": "Севастьянова 34к1"}, {"id": "10к2", "points": "233.0,466.9 233.1,468.9 232.2,468.9 233.0,484.5 234.4,484.4 235.0,494.5 233.6,494.6 234.2,506.4 235.8,506.3 236.2,512.7 238.5,512.6 238.6,514.5 240.8,514.4 240.9,515.6 246.8,515.3 246.7,514.0 249.1,513.9 249.0,511.8 250.9,511.7 248.4,466.0 233.0,466.9", "cx": 239.2, "cy": 497.4, "label": "Балканская 10к2"}, {"id": "12к2", "points": "287.8,463.9 289.4,505.0 291.0,504.9 291.2,509.6 294.6,509.4 294.7,509.7 300.5,509.4 300.6,511.0 306.0,510.8 305.9,509.2 315.2,508.9 315.1,505.8 316.7,505.8 316.6,502.9 315.0,503.0 314.9,500.7 313.1,500.7 312.9,494.9 304.9,495.2 304.9,494.1 300.9,494.3 300.6,486.6 301.7,486.5 301.2,472.6 303.3,471.3 302.7,470.3 313.0,464.1 313.5,464.9 316.2,463.3 316.7,464.2 321.0,461.6 320.5,460.7 323.6,458.8 323.1,458.0 328.3,454.9 328.8,455.8 332.0,453.8 332.7,455.0 337.5,452.2 336.8,451.0 340.1,449.0 339.6,448.2 344.9,448.0 345.0,450.1 347.9,450.0 347.8,447.9 353.2,447.7 353.4,453.5 350.0,453.6 350.9,475.9 353.4,475.8 353.7,486.1 352.8,486.1 353.3,498.3 353.8,498.3 354.0,504.2 356.7,504.1 356.7,506.1 359.2,506.0 359.2,507.1 365.1,506.9 365.1,505.8 367.3,505.7 367.2,503.7 369.3,503.6 367.3,452.9 365.9,453.0 365.2,434.3 356.7,434.7 356.6,433.6 347.0,434.0 347.0,435.1 344.2,435.2 344.3,436.3 338.8,436.5 338.7,434.9 332.2,435.1 332.3,436.7 320.9,443.5 321.9,445.1 317.5,447.7 316.7,446.4 305.6,453.0 306.4,454.4 301.9,457.0 301.0,455.6 287.7,463.6 287.8,463.9", "cx": 328.5, "cy": 472.7, "label": "Балканская 12к2"}, {"id": "14к2", "points": "401.8,418.9 406.7,496.7 408.3,496.6 408.6,501.2 411.8,501.0 411.8,501.4 417.9,501.0 418.0,502.8 423.2,502.5 423.1,500.3 432.2,499.8 431.7,492.6 430.1,492.7 429.7,486.7 422.4,487.1 422.3,485.7 418.1,486.0 418.0,483.9 416.9,483.9 416.6,478.7 418.8,478.6 418.2,469.4 418.9,469.4 418.7,466.1 420.5,466.0 420.1,459.5 418.3,459.6 417.7,450.1 419.2,450.0 418.8,444.5 417.4,444.6 417.1,440.7 416.4,440.7 416.1,436.4 413.9,436.6 413.5,430.3 418.4,430.0 418.6,432.0 421.4,431.8 421.3,429.8 427.0,429.5 427.1,430.9 430.8,430.6 430.9,431.8 436.3,431.5 436.3,430.3 440.0,430.1 439.9,428.7 445.7,428.3 445.7,429.6 449.1,429.3 449.2,430.7 454.5,430.4 454.4,429.0 457.6,428.8 457.6,427.6 463.6,427.2 463.7,428.9 466.6,428.7 466.5,427.0 471.4,426.7 471.8,432.0 469.3,432.1 469.5,436.1 468.8,436.2 469.0,439.9 467.4,440.0 468.2,451.9 467.0,452.0 468.0,467.9 470.8,467.8 471.1,472.2 470.1,472.3 470.5,477.8 468.9,477.9 469.6,490.0 471.2,489.9 471.6,495.8 473.6,495.6 473.8,497.9 476.8,497.7 476.9,498.9 482.0,498.6 481.9,497.4 484.2,497.3 484.0,495.0 486.4,494.8 481.3,414.0 401.8,418.9", "cx": 441.9, "cy": 459.8, "label": "Балканская 14к2"}, {"id": "28к1", "points": "688.9,371.6 639.2,393.6 645.8,483.4 666.9,481.8 665.9,468.3 656.8,468.9 651.9,402.5 690.8,385.0 703.6,384.1 703.8,386.9 710.6,478.9 727.9,477.6 721.1,385.6 719.9,369.2 688.9,371.6", "cx": 685.5, "cy": 420.6, "label": "Балканская 28к1"}, {"id": "28к2", "points": "592.2,488.3 606.3,487.5 603.0,420.6 549.4,406.9 549.4,407.0 522.9,408.5 527.7,493.8 548.0,492.7 547.0,476.0 540.8,476.3 537.7,420.1 546.6,419.6 589.0,430.4 592.2,488.3", "cx": 560.9, "cy": 451.1, "label": "Балканская 28к2"}];
+const ROADS_GEO=[{"cls": "drive", "pts": "93.6,301.6 116.2,300.2 123.0,394.7 111.7,398.9 101.9,397.8"}, {"cls": "drive", "pts": "76.9,116.3 114.0,115.1 141.9,113.7 143.4,99.5 147.8,96.5 176.1,95.7 178.7,99.4 183.3,209.4 143.9,211.6"}, {"cls": "drive", "pts": "-43.9,342.5 -38.7,341.9 -12.6,340.7 12.1,338.8 14.7,338.7 96.0,333.7"}, {"cls": "drive", "pts": "13.5,306.0 58.4,303.2 93.6,301.6 96.0,333.7"}, {"cls": "path", "pts": "95.3,398.3 95.9,405.6 82.2,417.4 87.4,489.6 89.5,511.0 94.3,554.6"}, {"cls": "drive", "pts": "8.2,229.8 36.0,228.4 67.2,229.4 68.0,238.3 68.5,249.7 71.6,264.7 77.0,276.6 83.7,285.5 93.6,301.6"}, {"cls": "drive", "pts": "-6.2,559.4 -2.4,559.3 4.6,559.3 8.5,559.3 48.2,557.1 94.3,554.6 146.6,546.5 153.3,545.4"}, {"cls": "drive", "pts": "94.3,554.6 95.1,561.3 97.2,578.6 102.5,599.4 102.9,617.8"}, {"cls": "drive", "pts": "141.9,113.7 144.1,151.4 146.2,186.5 147.0,202.3 143.9,211.6"}, {"cls": "drive", "pts": "-10.5,520.1 -5.4,519.8 0.6,519.7 45.4,515.8 89.5,511.0 137.2,505.3"}, {"cls": "drive", "pts": "114.0,115.1 114.5,125.9 117.1,184.2 117.2,188.0 137.5,187.0 146.2,186.5"}, {"cls": "drive", "pts": "72.3,198.2 67.9,204.7 67.7,219.7 67.2,229.4"}, {"cls": "drive", "pts": "82.0,189.3 72.3,198.2 6.1,201.0"}, {"cls": "drive", "pts": "101.9,397.8 95.3,398.3 59.6,401.0 49.7,401.7 33.6,402.9 30.8,371.2"}, {"cls": "drive", "pts": "111.7,398.9 116.5,454.0 126.9,460.8 130.0,467.3"}, {"cls": "drive", "pts": "76.9,116.3 79.9,169.7 82.0,189.3"}, {"cls": "drive", "pts": "-37.5,379.1 -31.8,378.5 -10.5,376.1 28.4,371.5 30.8,371.2 99.0,366.0"}, {"cls": "drive", "pts": "635.1,608.8 632.2,563.8"}, {"cls": "drive", "pts": "265.3,522.8 257.4,523.3 228.0,525.2 206.5,526.6 167.2,529.0 152.3,529.5"}, {"cls": "drive", "pts": "389.8,369.3 384.9,288.7 384.5,283.4"}, {"cls": "drive", "pts": "366.6,284.6 366.9,289.8 371.8,371.1"}, {"cls": "drive", "pts": "267.0,290.9 267.3,296.0 272.8,377.6"}, {"cls": "drive", "pts": "255.5,378.7 249.2,297.1 248.8,291.9"}, {"cls": "drive", "pts": "143.7,386.1 157.8,385.1 185.9,383.3 223.3,380.8 255.5,378.7 272.8,377.6 275.2,377.4 303.1,375.6 334.6,373.5 340.8,373.1 359.7,371.9 367.5,371.3 371.8,371.1"}, {"cls": "drive", "pts": "82.0,189.3 112.4,188.2 117.2,188.0"}, {"cls": "drive", "pts": "96.0,333.7 99.0,366.0 101.9,397.8"}, {"cls": "drive", "pts": "138.3,298.5 143.7,386.1 144.7,403.3 145.1,410.5 150.8,504.1 152.3,529.5 153.3,545.4"}, {"cls": "drive", "pts": "116.2,300.2 127.8,299.3 138.3,298.5 148.8,297.9 152.8,297.6 248.8,291.9 252.8,291.7 267.0,290.9 362.0,284.9 366.6,284.6 384.5,283.4 387.8,283.1 484.7,276.0"}, {"cls": "path", "pts": "159.8,413.7 180.3,412.3 206.8,410.9 214.5,416.3 217.5,423.2 218.4,440.3 189.9,441.9 190.3,448.6 192.8,492.7 200.4,496.4 205.3,503.3 206.3,523.1 206.5,526.6"}, {"cls": "drive", "pts": "484.7,276.0 502.5,274.6 513.6,274.3 598.2,269.0 602.7,268.7 619.6,267.7 706.1,262.0 721.9,260.9"}, {"cls": "drive", "pts": "514.3,398.4 548.6,398.2 611.3,417.3 611.3,402.9 627.9,401.5 629.9,386.4 677.3,365.2 723.4,359.4 728.0,358.9"}, {"cls": "path", "pts": "508.3,359.0 510.3,359.0 512.9,383.5 514.3,398.4"}, {"cls": "drive", "pts": "502.5,274.6 503.0,280.9 506.3,329.2 507.5,344.6 508.3,359.0"}, {"cls": "drive", "pts": "611.3,417.3 617.3,496.9 617.6,499.8 619.0,514.7"}, {"cls": "path", "pts": "159.5,409.9 159.8,413.7 162.3,449.9 167.0,525.4 167.2,529.0"}, {"cls": "path", "pts": "190.3,448.6 162.3,449.9"}, {"cls": "drive", "pts": "145.1,410.5 159.5,409.9 177.5,408.8"}, {"cls": "drive", "pts": "602.7,268.7 603.0,274.2 605.6,312.5 622.5,311.4 620.0,273.1 619.6,267.7"}, {"cls": "drive", "pts": "153.3,545.4 264.7,538.6 399.9,529.4 499.9,522.8 501.2,522.7 516.9,521.7"}, {"cls": "path", "pts": "223.3,380.8 223.2,378.5 218.9,324.6 216.9,323.8 183.2,326.0 181.7,327.2 185.7,381.0 185.9,383.3"}, {"cls": "path", "pts": "340.8,373.1 340.6,370.3 336.8,317.1 334.8,315.7 301.1,317.8 299.4,319.4 302.9,372.4 303.1,375.6"}, {"cls": "path", "pts": "459.0,357.9 455.4,310.0 453.7,308.6 419.3,311.0 417.6,312.6 420.7,360.6"}, {"cls": "path", "pts": "-2.1,567.2 7.7,566.8 17.4,566.3 48.5,565.0 95.1,561.3 145.4,557.5 146.6,546.5"}, {"cls": "path", "pts": "137.2,505.3 150.8,504.1"}, {"cls": "drive", "pts": "265.3,522.8 265.1,519.5 261.5,463.9 272.0,463.5 275.3,458.8 276.6,457.0 333.1,424.7 374.7,421.9 380.5,512.6 380.7,516.8"}, {"cls": "path", "pts": "561.0,504.0 560.7,500.4 557.5,465.5 548.2,466.2 546.0,435.3 549.8,431.9 554.1,431.3 578.6,438.9 582.9,499.1 583.1,502.3"}, {"cls": "drive", "pts": "693.6,509.5 693.9,515.3 699.6,604.7"}, {"cls": "drive", "pts": "516.9,521.7 563.4,518.5 619.0,514.7 636.2,514.0 693.6,509.5 727.2,507.2 730.0,502.2 729.9,491.3"}, {"cls": "path", "pts": "673.4,495.6 673.3,493.2 671.9,468.8 673.8,466.9 673.6,462.0 665.1,457.9 662.4,408.1 695.0,393.0 699.8,465.2 704.1,467.2 705.3,490.9 705.4,493.2"}, {"cls": "drive", "pts": "700.3,493.6 700.2,491.3 698.9,471.1 675.8,472.7 676.8,492.9 676.9,495.3"}, {"cls": "drive", "pts": "627.9,401.5 634.8,495.8 635.0,498.5 636.2,514.0"}, {"cls": "path", "pts": "622.5,311.4 625.9,318.2 633.3,321.7 660.4,320.2 659.3,300.1 688.8,298.4 689.9,318.4 720.3,316.7 725.3,316.4"}, {"cls": "path", "pts": "506.3,329.2 533.9,326.8 537.7,325.0 539.6,321.7 539.3,305.1 570.4,303.4 571.2,319.6"}, {"cls": "path", "pts": "507.5,344.6 559.5,320.4 571.2,319.6 601.4,317.6 604.2,317.4 605.6,312.5"}, {"cls": "drive", "pts": "390.6,409.1 395.7,403.2 414.7,402.1 440.4,400.6 482.3,398.2 492.0,402.3"}, {"cls": "drive", "pts": "499.9,522.8 499.0,508.6 498.7,504.3 492.0,402.3"}, {"cls": "drive", "pts": "515.6,507.4 499.0,508.6 497.6,508.7 494.8,508.9 463.8,511.1 443.9,512.5 404.9,515.3 399.1,515.7 390.5,516.3 380.7,516.8 375.1,517.1 345.6,518.6 325.8,519.6 286.9,521.7 279.6,522.0 265.3,522.8"}, {"cls": "drive", "pts": "762.6,614.2 759.2,586.0 754.6,558.6 753.2,543.0 751.2,496.7 749.1,462.9 747.6,434.0 747.2,412.6 744.2,392.3 741.9,371.3 742.6,358.7 743.9,346.2 743.2,341.4 738.8,330.7 735.7,320.7 735.2,309.0 735.7,285.1 734.9,256.4 734.5,240.3 738.1,232.7 738.4,214.6 733.5,143.3 730.4,102.6 726.7,32.6 721.7,-22.9 715.3,-109.9 712.5,-131.7 710.1,-143.7 683.3,-225.1"}, {"cls": "path", "pts": "420.7,360.6 421.4,372.1 421.5,373.7"}, {"cls": "path", "pts": "460.2,371.4 460.1,369.4 459.0,357.9"}, {"cls": "drive", "pts": "406.8,636.1 404.9,607.4 403.7,588.2 400.3,535.1 399.9,529.4 399.1,515.7"}, {"cls": "drive", "pts": "501.2,522.7 501.6,528.3 503.6,561.1 519.3,560.1 517.3,527.2 516.9,521.7"}, {"cls": "drive", "pts": "515.6,507.4 516.9,521.7"}, {"cls": "drive", "pts": "736.3,490.9 733.0,491.1 729.9,491.3 705.4,493.2 700.3,493.6 676.9,495.3 673.4,495.6 639.4,498.1 635.0,498.5 617.6,499.8 613.0,500.1 583.1,502.3 561.0,504.0 521.2,507.0 515.6,507.4"}, {"cls": "drive", "pts": "515.6,507.4 515.3,503.2 509.2,405.5 511.1,401.5 514.3,398.4"}, {"cls": "drive", "pts": "519.3,560.1 519.7,568.0 520.3,579.0 555.3,577.2"}, {"cls": "drive", "pts": "293.9,595.4 268.9,597.2 264.7,538.6"}, {"cls": "path", "pts": "404.9,515.3 404.6,511.0 402.8,507.7 396.5,414.6"}, {"cls": "path", "pts": "443.9,512.5 443.6,508.2 441.5,476.1 431.5,476.8 429.1,440.2 459.1,438.3 463.6,506.8 463.8,511.1"}, {"cls": "path", "pts": "487.3,408.2 492.0,402.3"}, {"cls": "path", "pts": "397.1,413.8 390.6,409.1"}, {"cls": "drive", "pts": "399.1,515.7 398.7,511.4 390.6,409.1"}, {"cls": "drive", "pts": "279.6,522.0 279.3,518.7 275.3,458.8"}, {"cls": "path", "pts": "521.2,507.0 521.0,502.9 516.2,406.4"}, {"cls": "path", "pts": "607.0,419.2 611.3,417.3"}, {"cls": "path", "pts": "517.4,405.1 511.1,401.5"}, {"cls": "path", "pts": "325.8,519.6 325.6,515.9 323.6,490.2 312.0,482.6 311.5,477.6 342.9,460.1 345.3,514.8 345.6,518.6"}, {"cls": "path", "pts": "375.1,517.1 374.8,513.0 376.3,510.2 371.6,429.7 370.2,428.3 368.8,426.8 333.1,428.4 280.9,462.2"}, {"cls": "path", "pts": "280.9,462.2 275.3,458.8"}, {"cls": "path", "pts": "370.2,428.3 374.7,421.9"}, {"cls": "path", "pts": "727.0,342.0 722.2,342.3 703.7,343.2 680.4,354.2 673.6,357.4 671.2,358.5 622.1,381.7 610.4,383.7 611.3,402.9"}, {"cls": "path", "pts": "213.2,522.7 209.2,459.7 217.4,450.5 223.0,449.4 255.8,447.2 282.0,445.5 334.3,416.3 364.7,396.7 375.0,391.5 377.1,390.1 390.7,388.2 399.4,388.3 407.4,390.0 418.4,392.3 434.4,392.7 448.7,386.7 450.5,386.0 462.9,384.8 476.7,387.2 480.1,387.7 489.4,388.9 503.7,386.2 512.9,383.5 516.6,382.4 530.0,388.0 610.4,383.7"}, {"cls": "path", "pts": "512.9,383.5 504.1,381.2 500.2,379.5 496.5,377.9 490.9,371.8 488.7,367.1"}, {"cls": "path", "pts": "500.2,379.5 494.5,383.1 486.3,386.3 480.1,387.7"}, {"cls": "path", "pts": "440.4,400.6 443.9,393.2 448.7,386.7 454.0,380.3 460.2,371.4"}, {"cls": "path", "pts": "414.7,402.1 411.4,396.8 407.4,390.0"}, {"cls": "path", "pts": "414.7,402.1 415.2,411.4"}, {"cls": "path", "pts": "440.4,400.6 441.2,409.6"}, {"cls": "path", "pts": "364.7,396.7 360.7,392.3 357.2,389.2 354.8,385.6 352.4,379.9 349.9,377.4 343.4,375.7 335.1,374.6 334.6,373.5"}, {"cls": "path", "pts": "228.0,525.2 227.9,521.8 224.7,461.3 256.4,459.3"}, {"cls": "path", "pts": "257.1,520.0 227.9,521.8 213.2,522.7 206.3,523.1 167.0,525.4"}, {"cls": "path", "pts": "143.7,386.1 134.1,389.3 123.0,394.7"}, {"cls": "path", "pts": "377.1,390.1 384.0,383.0 385.6,380.0 392.9,373.6"}, {"cls": "path", "pts": "344.9,385.5 347.4,380.1 349.9,377.4 354.9,373.0 359.7,371.9"}, {"cls": "path", "pts": "360.7,392.3 375.0,391.5"}, {"cls": "path", "pts": "364.7,396.7 352.8,394.6 344.9,385.5"}, {"cls": "path", "pts": "334.3,416.3 332.4,381.5 335.1,374.6"}, {"cls": "path", "pts": "726.1,328.5 721.2,328.8 669.6,332.8 671.2,358.5"}, {"cls": "path", "pts": "669.6,332.8 633.5,329.1 610.5,316.5 605.6,312.5"}, {"cls": "drive", "pts": "366.6,284.6 365.1,261.7 364.8,256.9 364.0,243.7 362.5,220.7 381.0,219.4 382.3,242.7 382.9,254.5 383.3,260.6 384.5,283.4"}, {"cls": "drive", "pts": "260.1,219.5 260.8,229.9 261.6,243.6 262.9,262.8 263.2,268.2 360.4,262.0 365.1,261.7 383.3,260.6 386.5,260.4 482.3,254.3 481.9,248.5 480.9,232.3 479.3,208.0 496.9,206.9 498.4,231.4 499.4,248.6 499.8,253.2"}, {"cls": "path", "pts": "185.7,381.0 157.7,382.8 153.0,302.8 244.6,297.3 250.3,376.5 223.2,378.5 185.7,381.0"}, {"cls": "path", "pts": "157.7,382.8 152.4,383.2 147.0,303.4 153.0,302.8"}, {"cls": "path", "pts": "639.4,498.1 639.2,495.7 631.3,397.9 633.7,389.7 681.9,369.4 724.0,366.4"}, {"cls": "path", "pts": "705.3,490.9 700.2,491.3 676.8,492.9 673.3,493.2"}, {"cls": "path", "pts": "612.8,497.2 617.3,496.9 634.8,495.8 639.2,495.7 673.3,493.2"}, {"cls": "path", "pts": "244.6,297.3 249.2,297.1 267.3,296.0 270.5,295.8 362.7,290.1 366.9,289.8 384.9,288.7 387.4,288.5 480.9,282.5 485.2,282.2 503.0,280.9 598.4,274.5 603.0,274.2 620.0,273.1 715.7,266.5 717.8,269.7 720.3,316.7"}, {"cls": "path", "pts": "598.4,274.5 601.4,317.6"}, {"cls": "path", "pts": "480.9,282.5 486.6,364.0 488.7,367.1"}, {"cls": "path", "pts": "486.6,364.0 482.6,366.6 473.2,368.9 460.1,369.4 421.4,372.1 397.4,373.0 393.1,370.3 392.4,368.3 387.4,288.5"}, {"cls": "path", "pts": "362.7,290.1 367.3,368.8 367.5,371.3"}, {"cls": "path", "pts": "270.5,295.8 275.0,374.0 275.2,377.4"}, {"cls": "path", "pts": "275.0,374.0 302.9,372.4 340.6,370.3 367.3,368.8"}, {"cls": "drive", "pts": "147.6,275.7 151.3,275.5 246.4,268.9 251.0,268.7 263.2,268.2"}, {"cls": "drive", "pts": "246.4,268.9 246.1,265.0 244.7,244.5 243.7,230.6 242.9,219.4"}, {"cls": "path", "pts": "151.3,275.5 151.1,271.3 148.1,218.8 170.9,217.2 213.7,214.0 239.6,212.8 264.9,211.1 265.3,217.5 266.0,229.6 266.8,243.3 267.9,262.6 262.9,262.8"}, {"cls": "path", "pts": "151.1,271.3 243.0,265.2 246.1,265.0"}, {"cls": "path", "pts": "239.6,212.8 240.8,230.8 241.7,244.5 243.0,265.2"}, {"cls": "path", "pts": "267.9,262.6 359.9,257.2 364.8,256.9"}, {"cls": "path", "pts": "359.9,257.2 358.9,243.9 356.7,213.9 356.5,207.1"}, {"cls": "path", "pts": "356.7,213.9 366.9,213.4"}, {"cls": "path", "pts": "376.0,212.9 383.9,212.4 385.4,242.6 386.0,254.5 382.9,254.5"}, {"cls": "path", "pts": "386.0,254.5 478.1,248.6 481.9,248.5"}, {"cls": "path", "pts": "559.7,162.8 548.3,165.0 529.7,173.7 500.8,185.2 474.7,193.0 459.2,195.7 446.8,198.0 430.6,201.1 405.0,203.8 383.4,205.9 356.5,207.1 348.6,206.5 329.7,206.5 297.2,202.3 267.9,201.1 249.6,200.9 226.3,203.0 208.3,206.0 193.2,208.1"}, {"cls": "drive", "pts": "482.3,254.3 499.8,253.2 597.6,247.0 601.1,246.8 617.8,245.4"}, {"cls": "path", "pts": "499.4,248.6 504.0,248.5 597.5,242.6 593.1,179.4 565.1,181.1 567.6,215.4 525.7,218.3 524.0,191.0"}, {"cls": "path", "pts": "475.0,202.5 501.5,201.1"}, {"cls": "path", "pts": "170.9,217.2 172.7,247.3 215.3,244.4 213.7,214.0"}, {"cls": "path", "pts": "265.3,217.5 287.5,216.0 289.0,240.4 332.0,237.3 329.7,206.5"}, {"cls": "path", "pts": "405.0,203.8 406.8,233.1 449.1,230.1 446.8,198.0"}, {"cls": "drive", "pts": "251.0,268.7 252.8,291.7"}, {"cls": "path", "pts": "151.3,275.5 152.8,297.6 153.0,302.8"}, {"cls": "path", "pts": "359.9,257.2 360.4,262.0 362.0,284.9 362.7,290.1"}, {"cls": "path", "pts": "386.0,254.5 386.5,260.4 387.8,283.1 387.4,288.5"}, {"cls": "path", "pts": "597.5,242.6 597.6,247.0 598.2,269.0 598.4,274.5"}, {"cls": "path", "pts": "477.1,232.6 480.9,232.3 498.4,231.4 503.1,231.1"}, {"cls": "path", "pts": "358.9,243.9 364.0,243.7 382.3,242.7 385.4,242.6"}, {"cls": "path", "pts": "240.8,230.8 243.7,230.6 260.8,229.9 266.0,229.6"}, {"cls": "path", "pts": "241.7,244.5 244.7,244.5 261.6,243.6 266.8,243.3"}, {"cls": "drive", "pts": "612.2,168.5 611.2,160.0 610.8,157.4 610.0,144.6 608.4,110.8 605.8,57.2 604.4,28.7 604.1,23.6 686.3,18.3"}, {"cls": "path", "pts": "615.2,144.3 614.9,139.4 613.3,110.6 610.3,57.0 608.8,28.6 686.6,22.8"}, {"cls": "path", "pts": "614.9,139.4 658.1,136.6 677.3,135.4 706.9,133.5"}, {"cls": "path", "pts": "658.1,136.6 656.3,108.1 644.9,108.7 634.1,109.2"}, {"cls": "path", "pts": "641.8,57.0 672.0,55.1 677.3,135.4"}, {"cls": "path", "pts": "475.0,202.5 474.7,193.0"}, {"cls": "path", "pts": "524.0,191.0 531.0,190.5 529.7,173.7"}, {"cls": "drive", "pts": "596.0,174.7 566.1,176.3"}, {"cls": "drive", "pts": "726.6,335.6 721.7,336.0 677.7,339.6"}, {"cls": "drive", "pts": "612.2,168.5 617.8,245.4 619.6,267.7"}, {"cls": "drive", "pts": "602.7,268.7 601.1,246.8 596.0,174.7 597.0,167.3 596.1,160.8"}, {"cls": "path", "pts": "500.8,185.2 501.5,201.1 503.1,231.1 504.0,248.5"}, {"cls": "path", "pts": "478.1,248.6 477.1,232.6 475.0,202.5"}, {"cls": "drive", "pts": "143.9,211.6 147.6,275.7 148.8,297.9"}, {"cls": "drive", "pts": "183.3,209.4 193.2,208.1 203.9,201.5 213.8,196.7 223.3,196.0"}, {"cls": "drive", "pts": "273.4,153.4 357.4,101.1 411.2,90.3 416.8,89.3 426.2,88.9 477.9,93.7 488.9,95.1 501.0,99.1 551.5,119.3 556.6,123.8 557.7,133.7 559.4,156.0 559.7,162.8 596.1,160.8 611.2,160.0"}, {"cls": "path", "pts": "706.1,262.0 710.3,251.9 717.4,243.6 726.1,240.3 734.5,240.3"}, {"cls": "path", "pts": "273.4,153.4 263.4,157.0 259.4,159.7 254.4,161.4 250.8,163.8 248.5,166.9 245.0,169.7 237.9,174.4 236.4,176.8 231.2,177.4 228.5,178.7 227.2,180.7 227.3,182.1 227.8,184.1 223.3,196.0 226.3,203.0"}, {"cls": "path", "pts": "110.0,217.3 111.1,235.9 68.0,238.3"}, {"cls": "path", "pts": "144.7,403.3 130.9,401.7 123.0,394.7"}, {"cls": "path", "pts": "329.7,206.5 264.9,211.1"}, {"cls": "path", "pts": "383.4,205.9 383.9,212.4"}, {"cls": "drive", "pts": "696.7,139.1 615.2,144.3 610.0,144.6"}, {"cls": "drive", "pts": "686.3,18.3 703.1,17.2 711.7,138.1 707.2,138.4 696.7,139.1"}, {"cls": "path", "pts": "686.6,22.8 699.7,21.9 706.9,133.5 707.2,138.4"}, {"cls": "path", "pts": "730.3,512.9 693.9,515.3 517.3,527.2 501.6,528.3 400.3,535.1"}, {"cls": "drive", "pts": "519.7,568.0 554.8,566.0"}, {"cls": "path", "pts": "720.3,316.7 721.2,328.8 721.7,336.0 722.2,342.3 723.4,359.4 724.0,366.4"}, {"cls": "path", "pts": "724.0,366.4 725.3,385.1 732.9,488.8 733.0,491.1"}, {"cls": "path", "pts": "732.9,488.8 705.3,490.9"}, {"cls": "path", "pts": "516.2,406.4 517.4,405.1 518.5,403.9 548.8,403.0 606.3,418.1 607.0,419.2 607.6,420.1 612.4,492.4 612.8,497.2 613.0,500.1"}, {"cls": "path", "pts": "612.8,497.2 582.9,499.1 560.7,500.4 521.0,502.9 515.3,503.2 498.7,504.3 494.5,504.5"}, {"cls": "path", "pts": "494.8,508.9 494.5,504.5 494.4,501.9 488.7,409.8 487.3,408.2 485.8,406.4 441.2,409.6 415.2,411.4 398.1,412.6 397.1,413.8 396.5,414.6"}, {"cls": "path", "pts": "404.6,511.0 443.6,508.2 463.6,506.8 494.5,504.5"}, {"cls": "path", "pts": "404.6,511.0 398.7,511.4 380.5,512.6 374.8,513.0"}, {"cls": "path", "pts": "286.8,518.2 325.6,515.9 345.3,514.8 374.8,513.0"}, {"cls": "path", "pts": "280.9,462.2 284.2,514.7 286.8,518.2"}, {"cls": "path", "pts": "255.8,447.2 256.4,459.3 259.6,515.7 257.1,520.0 257.4,523.3"}, {"cls": "path", "pts": "257.1,520.0 265.1,519.5 279.3,518.7 286.8,518.2"}, {"cls": "drive", "pts": "371.8,371.1 375.0,370.2 389.8,369.3 392.9,373.6 397.8,374.8 421.5,373.7 460.2,371.4 476.8,370.4 488.7,367.1 490.7,362.0 485.2,282.2 484.7,276.0"}, {"cls": "path", "pts": "159.5,409.9 157.8,385.1 157.7,382.8"}, {"cls": "path", "pts": "725.3,385.1 721.1,385.6"}, {"cls": "path", "pts": "721.1,385.6 703.8,386.9"}, {"cls": "path", "pts": "703.8,386.9 695.0,393.0"}, {"cls": "path", "pts": "114.5,125.9 140.9,151.3 136.1,158.0 117.1,184.2"}, {"cls": "path", "pts": "136.1,158.0 137.5,187.0"}, {"cls": "path", "pts": "140.9,151.3 144.1,151.4"}, {"cls": "path", "pts": "83.0,218.8 112.4,188.2"}, {"cls": "drive", "pts": "67.7,219.7 83.0,218.8 110.0,217.3"}, {"cls": "path", "pts": "673.6,357.4 677.3,365.2 681.9,369.4"}, {"cls": "path", "pts": "631.3,397.9 627.9,401.5"}, {"cls": "drive", "pts": "721.9,260.9 725.3,316.4 726.1,328.5 726.6,335.6 727.0,342.0 728.0,358.9 736.3,490.9"}, {"cls": "path", "pts": "374.7,421.9 390.6,409.1"}, {"cls": "path", "pts": "492.0,402.3 511.1,401.5"}, {"cls": "drive", "pts": "126.1,36.2 475.0,14.3 576.8,8.0 582.8,10.1 586.9,14.1 589.2,18.8 595.0,99.9 589.4,134.8 571.7,135.3 565.8,119.3 562.4,115.3 489.9,85.1 479.9,83.8 475.0,14.3"}];
+
+const SB_URL='https://xcajivwkpixsnpcdjrgf.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhjYWppdndrcGl4c25wY2RqcmdmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk5NDMyMTYsImV4cCI6MjA5NTUxOTIxNn0.CU1qYvXXEeI6j_5gQwIQOZevl_IAqNKS04iExbJhURI';
+const SB_TABLE='nk_dashboard_history';
+const SB_HEADERS={'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json'};
+
+let history=[];
+let houseToday=[];
+let liveShifts=[];
+let period='30';
+let selectedHouse=null;
+const statusEl=document.getElementById('save-status');
+const PROXY='https://api.cleansyst.ru/proxy.php';
+
+// Данные по периодам — кеш в памяти
+let periodCache={}; // {key: {tasks:{...}}}
+let liveInProgress=0; // текущий «в работе» — только из сегодня
+
+function fmtDate(iso){const d=new Date(iso);return d.getDate()+'.'+(d.getMonth()+1);}
+function isDayMode(){return period==='today'||period==='yesterday';}
+
+// Возвращает параметр date для API
+function getDateParam(p){
+  const now=new Date();
+  // Дата в МСК (UTC+3)
+  const msk=new Date(now.getTime()+3*3600*1000);
+  const todayStr=msk.toISOString().slice(0,10);
+  if(p==='today') return todayStr;
+  if(p==='yesterday'){
+    const y=new Date(msk); y.setUTCDate(y.getUTCDate()-1); return y.toISOString().slice(0,10);
+  }
+  if(p==='7'){
+    const mon=new Date(msk);
+    const dow=(mon.getUTCDay()||7);
+    mon.setUTCDate(mon.getUTCDate()-(dow-1));
+    return mon.toISOString().slice(0,10)+','+todayStr;
+  }
+  if(p==='30'){
+    const first=new Date(Date.UTC(msk.getUTCFullYear(),msk.getUTCMonth(),1));
+    return first.toISOString().slice(0,10)+','+todayStr;
+  }
+  return todayStr;
+}
+
+// periodData — что сейчас отображается в KPI
+let periodData=null; // {tasks, closed, inProgress, missed, rate, suffix}
+
+function renderKPI(){
+  const staffTotal = liveShifts.length;
+  const cameCount  = liveShifts.filter(s=>s.came).length;
+  const notCame    = staffTotal - cameCount;
+
+  if(!periodData){
+    document.getElementById('kpi-grid').innerHTML='<div style="grid-column:1/-1;text-align:center;color:var(--text-3);padding:20px;">⏳ Загрузка данных…</div>';
+    return;
+  }
+
+  const {tasks, closed, inProgress, missed, rate, suffix} = periodData;
+  const rateClass=rate>=90?'green':(rate>=75?'amber':'red');
+  const cards=[
+    {label:'% выполнения задач',    val:rate+'%',         cls:rateClass, sub:suffix},
+    {label:'Всего задач',            val:tasks,                           sub:'за период'},
+    {label:'Выполнено',              val:closed,           cls:'green',   sub:'из '+tasks},
+    {label:'В работе сейчас',        val:liveInProgress,   cls:liveInProgress>0?'amber':'', sub:'текущий момент'},
+    {label:'Пропущено',              val:missed,           cls:missed>0?'red':'',  sub:'за период'},
+    {label:'Не вышло на смену',      val:notCame,          cls:notCame>0?'red':'green', sub:'из '+staffTotal+' по плану'}
+  ];
+  document.getElementById('kpi-grid').innerHTML=cards.map(c=>
+    '<div class="kpi"><div class="kpi-label">'+c.label+'</div><div class="kpi-value '+(c.cls||'')+'">'+c.val+'</div><div class="kpi-sub">'+(c.sub||'')+'</div></div>').join('');
+}
+
+let chartRate;
+function renderCharts(){
+  if(chartRate)chartRate.destroy();
+  if(!periodData) return;
+  const rateTitle=document.getElementById('rate-title');
+
+  if(isDayMode()){
     // Почасовой график для сегодня/вчера
     const h=buildHourly(periodData.closed||0);
     const labels=h.hours.map(x=>x+':00');
