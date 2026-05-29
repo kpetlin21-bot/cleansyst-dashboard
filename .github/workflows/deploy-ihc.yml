@@ -1,0 +1,31 @@
+name: Deploy to IHC (api.cleansyst.ru)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy via FTP to IHC
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.IHC_FTP_HOST }}
+          username: ${{ secrets.IHC_FTP_USER }}
+          password: ${{ secrets.IHC_FTP_PASSWORD }}
+          port: 21
+          protocol: ftp
+          local-dir: ./
+          server-dir: ${{ secrets.IHC_REMOTE_DIR }}
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.github/**
+            **/README.md
+            **/setup-mac.sh
+            **/DEPLOY-IHC.md
